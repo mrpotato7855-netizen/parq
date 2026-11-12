@@ -1,0 +1,6 @@
+{
+  "name": "Barq",
+  "description": "تطبيق مراسلة فوري متكامل Telegram-like messaging app with real-time chat, groups, channels, and profile customization",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
