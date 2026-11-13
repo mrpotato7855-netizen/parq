@@ -3,7 +3,6 @@ package com.example.ui.screens
 import android.app.Activity
 import android.content.Context
 import android.util.Log
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,9 +14,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Chat
@@ -44,7 +46,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -83,6 +84,8 @@ fun AuthScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .systemBarsPadding()
+                .verticalScroll(rememberScrollState())
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
@@ -90,23 +93,24 @@ fun AuthScreen(
             // App Logo
             Box(
                 modifier = Modifier
-                    .size(110.dp)
+                    .size(96.dp)
                     .clip(CircleShape)
                     .background(TelegramBlue),
                 contentAlignment = Alignment.Center
             ) {
-                Image(
-                    painter = painterResource(id = R.drawable.barq_app_icon_1794447813078),
+                Icon(
+                    imageVector = Icons.Default.Bolt,
                     contentDescription = "Barq Logo",
-                    modifier = Modifier.fillMaxSize()
+                    tint = Color.White,
+                    modifier = Modifier.size(58.dp)
                 )
             }
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             Text(
                 text = "بَرْق",
-                fontSize = 36.sp,
+                fontSize = 34.sp,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onBackground
             )
@@ -116,10 +120,10 @@ fun AuthScreen(
                 fontSize = 15.sp,
                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
                 textAlign = TextAlign.Center,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
             )
 
-            Spacer(modifier = Modifier.height(32.dp))
+            Spacer(modifier = Modifier.height(20.dp))
 
             // Feature Highlights
             Card(
@@ -151,7 +155,7 @@ fun AuthScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(32.dp))
+            Spacer(modifier = Modifier.height(24.dp))
 
             if (errorMessage != null) {
                 Text(
@@ -258,6 +262,12 @@ private fun FeatureItem(
     }
 }
 
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is android.content.ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
 private fun signInWithGoogle(
     context: Context,
     credentialManager: CredentialManager,
@@ -266,6 +276,12 @@ private fun signInWithGoogle(
     onError: (String) -> Unit,
     onCancelled: () -> Unit
 ) {
+    val activity = context.findActivity()
+    if (activity == null) {
+        onError("تعذر فتح نافذة تسجيل الدخول (Activity unavailable)")
+        return
+    }
+
     val clientId = try {
         context.getString(R.string.default_web_client_id)
     } catch (e: Exception) {
@@ -278,7 +294,7 @@ private fun signInWithGoogle(
 
     scope.launch {
         try {
-            val result = credentialManager.getCredential(context as Activity, request)
+            val result = credentialManager.getCredential(activity, request)
             val credential = result.credential
             if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
                 val googleIdToken = GoogleIdTokenCredential.createFrom(credential.data).idToken

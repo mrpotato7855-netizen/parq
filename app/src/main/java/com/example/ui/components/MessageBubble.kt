@@ -2,15 +2,19 @@ package com.example.ui.components
 
 import android.content.Intent
 import android.net.Uri
-import androidx.compose.animation.AnimatedVisibility
+import android.widget.MediaController
+import android.widget.Toast
+import android.widget.VideoView
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -20,18 +24,21 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Forward
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Reply
+import androidx.compose.material.icons.filled.ShareLocation
+import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -40,6 +47,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,15 +60,29 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.example.data.model.Message
 import com.example.ui.theme.LocalChatBubbleColors
 import com.example.ui.theme.TelegramBlue
+import com.example.util.LocationHelper
 import com.example.util.TimeUtils
+import java.util.Locale
+
+private val URL_REGEX = Regex("https?://[\\w\\-._~:/?#\\[\\]@!$&'()*+,;=%]+")
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -68,6 +90,7 @@ fun MessageBubble(
     message: Message,
     isOutgoing: Boolean,
     isChannel: Boolean = false,
+    canDeleteAnyMessage: Boolean = false,
     playingVoiceId: String? = null,
     voiceProgress: Float = 0f,
     onPlayVoice: (String, String) -> Unit = { _, _ -> },
@@ -76,11 +99,14 @@ fun MessageBubble(
     onDelete: (Message) -> Unit = {},
     onPin: (Message) -> Unit = {},
     onForward: (Message) -> Unit = {},
+    onStopLiveLocation: (Message) -> Unit = {},
+    onSenderClick: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val bubbleColors = LocalChatBubbleColors.current
     val context = LocalContext.current
     var showMenu by remember { mutableStateOf(false) }
+    var showVideoPlayer by remember { mutableStateOf(false) }
 
     val bubbleColor = if (isOutgoing) bubbleColors.outgoingBubble else bubbleColors.incomingBubble
     val textColor = if (isOutgoing) bubbleColors.outgoingText else bubbleColors.incomingText
@@ -108,10 +134,34 @@ fun MessageBubble(
                     .widthIn(min = 60.dp, max = 320.dp)
                     .combinedClickable(
                         onClick = {
-                            if (message.type == "location") {
-                                val uri = "geo:${message.latitude},${message.longitude}?q=${message.latitude},${message.longitude}(Location)"
-                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(uri))
-                                context.startActivity(intent)
+                            when (message.type) {
+                                "location", "live_location" -> {
+                                    LocationHelper.openInMapsApp(
+                                        context,
+                                        message.latitude,
+                                        message.longitude,
+                                        message.content
+                                    )
+                                }
+                                "video" -> {
+                                    if (message.mediaUrl.isNotBlank()) {
+                                        showVideoPlayer = true
+                                    }
+                                }
+                                "document" -> {
+                                    if (message.mediaUrl.isNotBlank()) {
+                                        try {
+                                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(message.mediaUrl)).apply {
+                                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            }
+                                            context.startActivity(intent)
+                                        } catch (_: Exception) {
+                                            Toast.makeText(context, "لا يوجد تطبيق مناسب لفتح هذا الملف", Toast.LENGTH_SHORT).show()
+                                        }
+                                    } else {
+                                        Toast.makeText(context, "رابط الملف غير متوفر", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
                             }
                         },
                         onLongClick = { showMenu = true }
@@ -130,8 +180,8 @@ fun MessageBubble(
                             modifier = Modifier.padding(bottom = 4.dp)
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Reply,
-                                contentDescription = "Forwarded",
+                                imageVector = Icons.AutoMirrored.Filled.Forward,
+                                contentDescription = "رسالة محولة",
                                 tint = TelegramBlue,
                                 modifier = Modifier.size(14.dp)
                             )
@@ -180,39 +230,80 @@ fun MessageBubble(
                         Spacer(modifier = Modifier.height(4.dp))
                     }
 
-                    // Sender name for groups/channels incoming messages
+                    // Sender name for incoming messages in groups
                     if (!isOutgoing && message.senderName.isNotBlank() && !isChannel) {
                         Text(
                             text = message.senderName,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                             color = TelegramBlue,
-                            modifier = Modifier.padding(bottom = 2.dp)
+                            modifier = Modifier
+                                .clickable {
+                                    if (message.senderId.isNotBlank()) {
+                                        onSenderClick(message.senderId)
+                                    }
+                                }
+                                .padding(bottom = 2.dp)
                         )
                     }
 
-                    // Content depending on message type
+                    // Message content by type
                     when (message.type) {
                         "text" -> {
+                            val linkAnnotated = remember(message.content) {
+                                buildAnnotatedString {
+                                    val matches = URL_REGEX.findAll(message.content)
+                                    var lastIdx = 0
+                                    for (match in matches) {
+                                        if (match.range.first > lastIdx) {
+                                            append(message.content.substring(lastIdx, match.range.first))
+                                        }
+                                        val url = match.value
+                                        withLink(
+                                            LinkAnnotation.Url(
+                                                url = url,
+                                                styles = TextLinkStyles(
+                                                    style = SpanStyle(
+                                                        color = TelegramBlue,
+                                                        textDecoration = TextDecoration.Underline,
+                                                        fontWeight = FontWeight.Medium
+                                                    )
+                                                )
+                                            )
+                                        ) {
+                                            append(url)
+                                        }
+                                        lastIdx = match.range.last + 1
+                                    }
+                                    if (lastIdx < message.content.length) {
+                                        append(message.content.substring(lastIdx))
+                                    }
+                                }
+                            }
                             Text(
-                                text = message.content,
-                                fontSize = 15.sp,
-                                color = textColor,
-                                lineHeight = 20.sp
+                                text = linkAnnotated,
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    fontSize = 15.sp,
+                                    color = textColor,
+                                    lineHeight = 20.sp
+                                )
                             )
                         }
                         "image" -> {
                             Column {
                                 AsyncImage(
-                                    model = message.mediaUrl,
-                                    contentDescription = "Photo",
+                                    model = ImageRequest.Builder(context)
+                                        .data(message.mediaUrl)
+                                        .crossfade(true)
+                                        .build(),
+                                    contentDescription = "صورة",
                                     contentScale = ContentScale.Crop,
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .height(180.dp)
-                                        .clip(RoundedCornerShape(8.dp))
+                                        .height(190.dp)
+                                        .clip(RoundedCornerShape(10.dp))
                                 )
-                                if (message.content.isNotBlank()) {
+                                if (message.content.isNotBlank() && message.content != "صورة") {
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text(
                                         text = message.content,
@@ -222,41 +313,87 @@ fun MessageBubble(
                                 }
                             }
                         }
+                        "video" -> {
+                            Column {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(170.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(Color(0xFF1A1F29)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(56.dp)
+                                            .background(Color.Black.copy(alpha = 0.55f), CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.PlayArrow,
+                                            contentDescription = "تشغيل الفيديو",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(34.dp)
+                                        )
+                                    }
+                                    Surface(
+                                        color = Color.Black.copy(alpha = 0.65f),
+                                        shape = RoundedCornerShape(6.dp),
+                                        modifier = Modifier
+                                            .align(Alignment.BottomStart)
+                                            .padding(8.dp)
+                                    ) {
+                                        Text(
+                                            text = "فيديو • اضغط للتشغيل",
+                                            color = Color.White,
+                                            fontSize = 11.sp,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
                         "voice" -> {
                             val isPlaying = playingVoiceId == message.messageId
+                            val mins = message.durationSec / 60
+                            val secs = message.durationSec % 60
+                            val formattedDur = String.format(Locale.US, "%02d:%02d", mins, secs)
+
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 2.dp)
                             ) {
                                 IconButton(
                                     onClick = { onPlayVoice(message.messageId, message.mediaUrl) },
                                     modifier = Modifier
-                                        .size(36.dp)
+                                        .size(40.dp)
                                         .background(TelegramBlue, CircleShape)
                                 ) {
                                     Icon(
                                         imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                        contentDescription = "Play voice",
+                                        contentDescription = "تشغيل الرسالة الصوتية",
                                         tint = Color.White,
-                                        modifier = Modifier.size(20.dp)
+                                        modifier = Modifier.size(22.dp)
                                     )
                                 }
-                                Spacer(modifier = Modifier.width(8.dp))
+                                Spacer(modifier = Modifier.width(10.dp))
                                 Column(modifier = Modifier.weight(1f)) {
                                     LinearProgressIndicator(
                                         progress = { if (isPlaying) voiceProgress else 0f },
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .height(4.dp)
-                                            .clip(RoundedCornerShape(2.dp)),
+                                            .height(5.dp)
+                                            .clip(RoundedCornerShape(3.dp)),
                                         color = TelegramBlue,
                                         trackColor = Color.LightGray.copy(alpha = 0.5f)
                                     )
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text(
-                                        text = "${message.durationSec}s",
+                                        text = if (isPlaying) "جاري التشغيل • $formattedDur" else formattedDur,
                                         fontSize = 11.sp,
-                                        color = textColor.copy(alpha = 0.6f)
+                                        color = textColor.copy(alpha = 0.65f)
                                     )
                                 }
                             }
@@ -268,17 +405,17 @@ fun MessageBubble(
                             ) {
                                 Box(
                                     modifier = Modifier
-                                        .size(40.dp)
+                                        .size(42.dp)
                                         .background(TelegramBlue, CircleShape),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.InsertDriveFile,
-                                        contentDescription = "File",
+                                        contentDescription = "ملف",
                                         tint = Color.White
                                     )
                                 }
-                                Spacer(modifier = Modifier.width(8.dp))
+                                Spacer(modifier = Modifier.width(10.dp))
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
                                         text = message.fileName.ifBlank { "مستند" },
@@ -290,43 +427,93 @@ fun MessageBubble(
                                     )
                                     val sizeKb = (message.fileSize / 1024).coerceAtLeast(1)
                                     Text(
-                                        text = "$sizeKb KB",
+                                        text = "$sizeKb كيلوبايت • اضغط للفتح",
                                         fontSize = 11.sp,
-                                        color = textColor.copy(alpha = 0.6f)
+                                        color = textColor.copy(alpha = 0.65f)
                                     )
                                 }
                             }
                         }
-                        "location" -> {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
+                        "location", "live_location" -> {
+                            val isLive = message.type == "live_location" || message.isLiveLocation
+                            val isStillLive = isLive && message.liveLocationActive &&
+                                (message.liveLocationExpiresAt == 0L || message.liveLocationExpiresAt > System.currentTimeMillis())
+
+                            Column(modifier = Modifier.fillMaxWidth()) {
                                 Box(
                                     modifier = Modifier
-                                        .size(40.dp)
-                                        .background(Color(0xFFE53935), CircleShape),
-                                    contentAlignment = Alignment.Center
+                                        .fillMaxWidth()
+                                        .height(130.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(MaterialTheme.colorScheme.surfaceVariant)
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.LocationOn,
-                                        contentDescription = "Location",
-                                        tint = Color.White
+                                    AsyncImage(
+                                        model = ImageRequest.Builder(context)
+                                            .data(LocationHelper.osmTileUrl(message.latitude, message.longitude))
+                                            .crossfade(true)
+                                            .build(),
+                                        contentDescription = "خريطة الموقع",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
                                     )
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.Center)
+                                            .size(34.dp)
+                                            .background(Color(0xFFE53935).copy(alpha = 0.25f), CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isLive) Icons.Default.ShareLocation else Icons.Default.LocationOn,
+                                            contentDescription = "دبوس الموقع",
+                                            tint = Color(0xFFE53935),
+                                            modifier = Modifier.size(24.dp)
+                                        )
+                                    }
+                                    if (isLive) {
+                                        Surface(
+                                            color = if (isStillLive) Color(0xFFE53935) else Color.DarkGray,
+                                            shape = RoundedCornerShape(6.dp),
+                                            modifier = Modifier
+                                                .align(Alignment.TopStart)
+                                                .padding(6.dp)
+                                        ) {
+                                            Text(
+                                                text = if (isStillLive) "مباشر الآن" else "انتهت المشاركة",
+                                                color = Color.White,
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
                                 }
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Column {
-                                    Text(
-                                        text = message.content.ifBlank { "موقع جغرافي" },
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = textColor
-                                    )
-                                    Text(
-                                        text = "اضغط للمشاهدة على الخريطة",
-                                        fontSize = 11.sp,
-                                        color = TelegramBlue
-                                    )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    text = message.content.ifBlank { "موقع جغرافي" },
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = textColor
+                                )
+                                Text(
+                                    text = String.format(Locale.US, "%.5f, %.5f • اضغط للفتح في الخرائط", message.latitude, message.longitude),
+                                    fontSize = 11.sp,
+                                    color = TelegramBlue
+                                )
+                                if (isOutgoing && isStillLive) {
+                                    TextButton(
+                                        onClick = { onStopLiveLocation(message) },
+                                        modifier = Modifier.align(Alignment.End)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.StopCircle,
+                                            contentDescription = null,
+                                            tint = Color(0xFFE53935),
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("إيقاف المشاركة", color = Color(0xFFE53935), fontSize = 12.sp)
+                                    }
                                 }
                             }
                         }
@@ -358,7 +545,7 @@ fun MessageBubble(
                         if (isChannel && message.viewsCount > 0) {
                             Icon(
                                 imageVector = Icons.Default.Visibility,
-                                contentDescription = "Views",
+                                contentDescription = "المشاهدات",
                                 tint = textColor.copy(alpha = 0.5f),
                                 modifier = Modifier.size(12.dp)
                             )
@@ -382,14 +569,14 @@ fun MessageBubble(
                             if (message.status == "read") {
                                 Icon(
                                     imageVector = Icons.Default.DoneAll,
-                                    contentDescription = "Read",
+                                    contentDescription = "تمت القراءة",
                                     tint = bubbleColors.checkMarkRead,
                                     modifier = Modifier.size(14.dp)
                                 )
                             } else {
                                 Icon(
                                     imageVector = Icons.Default.Check,
-                                    contentDescription = "Sent",
+                                    contentDescription = "تم الإرسال",
                                     tint = bubbleColors.checkMarkSent,
                                     modifier = Modifier.size(14.dp)
                                 )
@@ -413,6 +600,14 @@ fun MessageBubble(
                     leadingIcon = { Icon(Icons.Default.Reply, contentDescription = null) }
                 )
                 DropdownMenuItem(
+                    text = { Text("إعادة توجيه") },
+                    onClick = {
+                        showMenu = false
+                        onForward(message)
+                    },
+                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.Forward, contentDescription = null) }
+                )
+                DropdownMenuItem(
                     text = { Text("تثبيت") },
                     onClick = {
                         showMenu = false
@@ -430,14 +625,56 @@ fun MessageBubble(
                         leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) }
                     )
                 }
-                DropdownMenuItem(
-                    text = { Text("حذف") },
-                    onClick = {
-                        showMenu = false
-                        onDelete(message)
-                    },
-                    leadingIcon = { Icon(Icons.Default.FileDownload, contentDescription = null) }
-                )
+                if (isOutgoing || canDeleteAnyMessage) {
+                    DropdownMenuItem(
+                        text = { Text("حذف", color = Color(0xFFE53935)) },
+                        onClick = {
+                            showMenu = false
+                            onDelete(message)
+                        },
+                        leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFFE53935)) }
+                    )
+                }
+            }
+        }
+    }
+
+    if (showVideoPlayer && message.mediaUrl.isNotBlank()) {
+        Dialog(
+            onDismissRequest = { showVideoPlayer = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Surface(
+                color = Color.Black,
+                modifier = Modifier.fillMaxSize()
+            ) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    AndroidView(
+                        factory = { ctx ->
+                            VideoView(ctx).apply {
+                                val controller = MediaController(ctx)
+                                controller.setAnchorView(this)
+                                setMediaController(controller)
+                                setVideoURI(Uri.parse(message.mediaUrl))
+                                setOnPreparedListener { mp ->
+                                    mp.start()
+                                }
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.Center)
+                    )
+                    IconButton(
+                        onClick = { showVideoPlayer = false },
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(16.dp)
+                            .background(Color.Black.copy(alpha = 0.55f), CircleShape)
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = "إغلاق الفيديو", tint = Color.White)
+                    }
+                }
             }
         }
     }

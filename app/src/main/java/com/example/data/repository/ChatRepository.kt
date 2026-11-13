@@ -44,7 +44,11 @@ class ChatRepository(private val db: FirebaseFirestore) {
         emitAll(
             query.snapshots()
                 .map { snapshot ->
-                    snapshot.toObjects(Chat::class.java).sortedByDescending {
+                    snapshot.documents.mapNotNull { doc ->
+                        doc.toObject(Chat::class.java)?.let {
+                            if (it.chatId.isBlank()) it.copy(chatId = doc.id) else it
+                        }
+                    }.sortedByDescending {
                         it.lastMessageTime?.toDate()?.time ?: it.updatedAt?.toDate()?.time ?: 0L
                     }
                 }
@@ -69,7 +73,13 @@ class ChatRepository(private val db: FirebaseFirestore) {
 
         emitAll(
             query.snapshots()
-                .map { snapshot -> snapshot.toObjects(Chat::class.java) }
+                .map { snapshot ->
+                    snapshot.documents.mapNotNull { doc ->
+                        doc.toObject(Chat::class.java)?.let {
+                            if (it.chatId.isBlank()) it.copy(chatId = doc.id) else it
+                        }
+                    }
+                }
                 .catch { error ->
                     val firestoreError = generateSequence(error) { it.cause }
                         .filterIsInstance<FirebaseFirestoreException>()
@@ -87,8 +97,19 @@ class ChatRepository(private val db: FirebaseFirestore) {
     suspend fun getChatById(chatId: String): Chat? {
         requireUserId()
         val docRef = db.collection("chats").document(chatId)
-        val snapshot = docRef.get().await()
-        return if (snapshot.exists()) snapshot.toObject(Chat::class.java)?.copy(chatId = snapshot.id) else null
+        val snapshot = try {
+            docRef.get().await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.GET, docRef.path)
+            throw e
+        }
+        return if (snapshot.exists()) {
+            snapshot.toObject(Chat::class.java)?.let {
+                if (it.chatId.isBlank()) it.copy(chatId = snapshot.id) else it
+            }
+        } else null
     }
 
     suspend fun createOrGetDirectChat(targetUser: User): Chat {
@@ -97,18 +118,34 @@ class ChatRepository(private val db: FirebaseFirestore) {
         val sortedUids = listOf(uid, targetUser.userId).sorted()
         val directChatId = "direct_${sortedUids[0]}_${sortedUids[1]}"
         val docRef = db.collection("chats").document(directChatId)
-        val snapshot = docRef.get().await()
+        val snapshot = try {
+            docRef.get().await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.GET, docRef.path)
+            throw e
+        }
 
         if (snapshot.exists()) {
-            return snapshot.toObject(Chat::class.java)?.copy(chatId = directChatId)
-                ?: Chat(chatId = directChatId, type = "direct", ownerId = uid, participantUids = sortedUids)
+            return snapshot.toObject(Chat::class.java)?.let {
+                if (it.chatId.isBlank()) it.copy(chatId = directChatId) else it
+            } ?: Chat(chatId = directChatId, type = "direct", ownerId = uid, participantUids = sortedUids)
         }
+
+        val isSelfChat = targetUser.userId == uid
+        val chatName = if (isSelfChat) {
+            "الرسائل المحفوظة"
+        } else {
+            targetUser.displayName.ifBlank { "@${targetUser.username}" }.take(100)
+        }
+        val chatAvatar = targetUser.avatarUrl.take(2000)
 
         val payload = mapOf(
             "chatId" to directChatId,
             "type" to "direct",
-            "name" to targetUser.displayName,
-            "avatarUrl" to targetUser.avatarUrl,
+            "name" to chatName,
+            "avatarUrl" to chatAvatar,
             "ownerId" to uid,
             "participantUids" to sortedUids,
             "adminUids" to sortedUids,
@@ -124,8 +161,8 @@ class ChatRepository(private val db: FirebaseFirestore) {
             return Chat(
                 chatId = directChatId,
                 type = "direct",
-                name = targetUser.displayName,
-                avatarUrl = targetUser.avatarUrl,
+                name = chatName,
+                avatarUrl = chatAvatar,
                 ownerId = uid,
                 participantUids = sortedUids
             )
@@ -141,21 +178,24 @@ class ChatRepository(private val db: FirebaseFirestore) {
         val uid = requireUserId()
         val groupId = "group_${UUID.randomUUID()}"
         val docRef = db.collection("chats").document(groupId)
-        val allParticipants = (memberUids + uid).distinct()
+        val allParticipants = (memberUids + uid).distinct().take(200)
+        val safeName = name.trim().ifBlank { "مجموعة" }.take(100)
+        val safeAbout = about.trim().take(500)
+        val safeAvatar = avatarUrl.trim().take(2000)
 
         val payload = mapOf(
             "chatId" to groupId,
             "type" to "group",
-            "name" to name,
-            "about" to about,
-            "avatarUrl" to avatarUrl,
+            "name" to safeName,
+            "about" to safeAbout,
+            "avatarUrl" to safeAvatar,
             "ownerId" to uid,
             "participantUids" to allParticipants,
             "adminUids" to listOf(uid),
             "lastMessage" to "Group created",
             "lastMessageType" to "text",
             "isPublic" to false,
-            "inviteLink" to "https://barq.chat/join/$groupId",
+            "inviteLink" to "https://barq.chat/join/$groupId".take(300),
             "createdAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp()
         )
@@ -165,9 +205,9 @@ class ChatRepository(private val db: FirebaseFirestore) {
             return Chat(
                 chatId = groupId,
                 type = "group",
-                name = name,
-                about = about,
-                avatarUrl = avatarUrl,
+                name = safeName,
+                about = safeAbout,
+                avatarUrl = safeAvatar,
                 ownerId = uid,
                 participantUids = allParticipants,
                 adminUids = listOf(uid),
@@ -185,21 +225,26 @@ class ChatRepository(private val db: FirebaseFirestore) {
         val uid = requireUserId()
         val channelId = "channel_${UUID.randomUUID()}"
         val docRef = db.collection("chats").document(channelId)
+        val safeName = name.trim().ifBlank { "قناة" }.take(100)
+        val safeAbout = about.trim().take(500)
+        val safeAvatar = avatarUrl.trim().take(2000)
+        val safeUsername = username.trim().removePrefix("@").lowercase().take(40)
+        val inviteLink = "https://barq.chat/c/${safeUsername.ifBlank { channelId }}".take(300)
 
         val payload = mapOf(
             "chatId" to channelId,
             "type" to "channel",
-            "name" to name,
-            "about" to about,
-            "avatarUrl" to avatarUrl,
-            "channelUsername" to username.trim().removePrefix("@").lowercase(),
+            "name" to safeName,
+            "about" to safeAbout,
+            "avatarUrl" to safeAvatar,
+            "channelUsername" to safeUsername,
             "ownerId" to uid,
             "participantUids" to listOf(uid),
             "adminUids" to listOf(uid),
             "lastMessage" to "Channel created",
             "lastMessageType" to "text",
             "isPublic" to isPublic,
-            "inviteLink" to "https://barq.chat/c/${username.ifBlank { channelId }}",
+            "inviteLink" to inviteLink,
             "createdAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp()
         )
@@ -209,20 +254,239 @@ class ChatRepository(private val db: FirebaseFirestore) {
             return Chat(
                 chatId = channelId,
                 type = "channel",
-                name = name,
-                about = about,
-                avatarUrl = avatarUrl,
-                channelUsername = username,
+                name = safeName,
+                about = safeAbout,
+                avatarUrl = safeAvatar,
+                channelUsername = safeUsername,
                 ownerId = uid,
                 participantUids = listOf(uid),
                 adminUids = listOf(uid),
                 isPublic = isPublic,
-                inviteLink = "https://barq.chat/c/${username.ifBlank { channelId }}"
+                inviteLink = inviteLink
             )
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, docRef.path)
+            throw e
+        }
+    }
+
+    fun observeChat(chatId: String): Flow<Chat?> = flow {
+        requireUserId()
+        val docRef = db.collection("chats").document(chatId)
+        emitAll(
+            docRef.snapshots()
+                .map { snapshot ->
+                    if (snapshot.exists()) {
+                        snapshot.toObject(Chat::class.java)?.let {
+                            if (it.chatId.isBlank()) it.copy(chatId = snapshot.id) else it
+                        }
+                    } else null
+                }
+                .catch { error ->
+                    val firestoreError = generateSequence(error) { it.cause }
+                        .filterIsInstance<FirebaseFirestoreException>()
+                        .firstOrNull()
+                    if (firestoreError == null && error is CancellationException) throw error
+                    val exceptionToLog = firestoreError ?: (error as? Exception)
+                    if (exceptionToLog != null && auth.currentUser != null) {
+                        handleFirestoreError(exceptionToLog, OperationType.GET, docRef.path)
+                    }
+                    throw error
+                }
+        )
+    }
+
+    suspend fun getOrCreateSavedMessagesChat(): Chat {
+        val uid = requireUserId()
+        val savedChatId = "saved_$uid"
+        val docRef = db.collection("chats").document(savedChatId)
+        val snapshot = try {
+            docRef.get().await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.GET, docRef.path)
+            throw e
+        }
+
+        if (snapshot.exists()) {
+            return snapshot.toObject(Chat::class.java)?.let {
+                if (it.chatId.isBlank()) it.copy(chatId = savedChatId, isSavedMessages = true) else it
+            } ?: Chat(
+                chatId = savedChatId,
+                type = "direct",
+                name = "المحفوظات",
+                ownerId = uid,
+                participantUids = listOf(uid),
+                isSavedMessages = true
+            )
+        }
+
+        val payload = mapOf(
+            "chatId" to savedChatId,
+            "type" to "direct",
+            "name" to "المحفوظات",
+            "about" to "مساحتك السحابية الخاصة لحفظ الرسائل والملفات والروابط",
+            "avatarUrl" to "",
+            "ownerId" to uid,
+            "participantUids" to listOf(uid),
+            "adminUids" to listOf(uid),
+            "lastMessage" to "",
+            "lastMessageType" to "text",
+            "isPublic" to false,
+            "isSavedMessages" to true,
+            "createdAt" to FieldValue.serverTimestamp(),
+            "updatedAt" to FieldValue.serverTimestamp()
+        )
+        try {
+            docRef.set(payload).await()
+            return Chat(
+                chatId = savedChatId,
+                type = "direct",
+                name = "المحفوظات",
+                about = "مساحتك السحابية الخاصة لحفظ الرسائل والملفات والروابط",
+                ownerId = uid,
+                participantUids = listOf(uid),
+                adminUids = listOf(uid),
+                isPublic = false,
+                isSavedMessages = true
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, docRef.path)
+            throw e
+        }
+    }
+
+    suspend fun updateGroupOrChannelSettings(
+        chatId: String,
+        name: String,
+        about: String,
+        avatarUrl: String,
+        coverUrl: String,
+        isPublic: Boolean,
+        channelUsername: String,
+        onlyAdminsCanPost: Boolean,
+        joinRequiresApproval: Boolean
+    ) {
+        requireUserId()
+        val docRef = db.collection("chats").document(chatId)
+        val safeName = name.trim().ifBlank { "محادثة" }.take(100)
+        val safeAbout = about.trim().take(500)
+        val safeAvatar = avatarUrl.trim().take(2000)
+        val safeCover = coverUrl.trim().take(2000)
+        val safeUsername = channelUsername.trim().removePrefix("@").lowercase().take(40)
+        val inviteLink = if (safeUsername.isNotBlank() && isPublic) {
+            "https://barq.chat/c/$safeUsername".take(300)
+        } else {
+            "https://barq.chat/join/$chatId".take(300)
+        }
+
+        val updates = mapOf(
+            "name" to safeName,
+            "about" to safeAbout,
+            "avatarUrl" to safeAvatar,
+            "coverUrl" to safeCover,
+            "isPublic" to isPublic,
+            "channelUsername" to safeUsername,
+            "onlyAdminsCanPost" to onlyAdminsCanPost,
+            "joinRequiresApproval" to joinRequiresApproval,
+            "inviteLink" to inviteLink,
+            "updatedAt" to FieldValue.serverTimestamp()
+        )
+        try {
+            docRef.update(updates).await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            throw e
+        }
+    }
+
+    suspend fun addMemberToChat(chatId: String, targetUserId: String) {
+        requireUserId()
+        val docRef = db.collection("chats").document(chatId)
+        try {
+            docRef.update(
+                mapOf(
+                    "participantUids" to FieldValue.arrayUnion(targetUserId),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            throw e
+        }
+    }
+
+    suspend fun removeMemberFromChat(chatId: String, targetUserId: String) {
+        requireUserId()
+        val docRef = db.collection("chats").document(chatId)
+        try {
+            val snap = docRef.get().await()
+            val chat = snap.toObject(Chat::class.java) ?: return
+            if (targetUserId == chat.ownerId) {
+                throw IllegalStateException("لا يمكن إزالة مالك المجموعة أو القناة")
+            }
+            val updatedParticipants = chat.participantUids.filter { it != targetUserId }
+            val updatedAdmins = chat.adminUids.filter { it != targetUserId }
+            val updatedPerms = chat.adminPermissions.toMutableMap().apply { remove(targetUserId) }
+            docRef.update(
+                mapOf(
+                    "participantUids" to updatedParticipants,
+                    "adminUids" to updatedAdmins,
+                    "adminPermissions" to updatedPerms,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            throw e
+        }
+    }
+
+    suspend fun updateAdminAndPermissions(
+        chatId: String,
+        targetUserId: String,
+        isAdmin: Boolean,
+        permissions: Map<String, Boolean>
+    ) {
+        requireUserId()
+        val docRef = db.collection("chats").document(chatId)
+        try {
+            val snap = docRef.get().await()
+            val chat = snap.toObject(Chat::class.java) ?: return
+            if (targetUserId == chat.ownerId) return
+            val updatedAdmins = if (isAdmin) {
+                (chat.adminUids + targetUserId).distinct().take(50)
+            } else {
+                chat.adminUids.filter { it != targetUserId }
+            }
+            val updatedPerms = chat.adminPermissions.toMutableMap()
+            if (isAdmin) {
+                updatedPerms[targetUserId] = permissions
+            } else {
+                updatedPerms.remove(targetUserId)
+            }
+            docRef.update(
+                mapOf(
+                    "adminUids" to updatedAdmins,
+                    "adminPermissions" to updatedPerms,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
             throw e
         }
     }
@@ -286,7 +550,10 @@ class ChatRepository(private val db: FirebaseFirestore) {
             collection.snapshots()
                 .map { snapshot ->
                     snapshot.documents.associate { doc ->
-                        doc.id to (doc.toObject(ChatSettings::class.java) ?: ChatSettings(chatId = doc.id))
+                        val settings = doc.toObject(ChatSettings::class.java)?.let {
+                            if (it.chatId.isBlank()) it.copy(chatId = doc.id) else it
+                        } ?: ChatSettings(chatId = doc.id)
+                        doc.id to settings
                     }
                 }
                 .catch { error ->

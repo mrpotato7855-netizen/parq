@@ -11,12 +11,13 @@ import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
+import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
 
@@ -39,7 +40,13 @@ class ContactRepository(private val db: FirebaseFirestore) {
         val col = db.collection("users").document(userId).collection("contacts")
         emitAll(
             col.snapshots()
-                .map { snapshot -> snapshot.toObjects(Contact::class.java) }
+                .map { snapshot ->
+                    snapshot.documents.mapNotNull { doc ->
+                        doc.toObject(Contact::class.java)?.let {
+                            if (it.contactUid.isBlank()) it.copy(contactUid = doc.id) else it
+                        }
+                    }
+                }
                 .catch { error ->
                     val firestoreError = generateSequence(error) { it.cause }
                         .filterIsInstance<FirebaseFirestoreException>()
@@ -54,17 +61,31 @@ class ContactRepository(private val db: FirebaseFirestore) {
         )
     }
 
-    suspend fun addContact(contactUid: String, contactUsername: String, contactName: String) {
+    suspend fun addContact(
+        contactUid: String,
+        contactUsername: String,
+        contactName: String,
+        customName: String = ""
+    ) {
         val uid = requireUserId()
         val docRef = db.collection("users").document(uid).collection("contacts").document(contactUid)
-        val payload = mapOf(
+        val existingSnap = runCatching { docRef.get().await() }.getOrNull()
+        val existingCustom = existingSnap?.getString("customName").orEmpty()
+        val effectiveCustom = customName.trim().ifBlank { existingCustom }.take(60)
+        val safeRealName = contactName.trim().ifBlank { "@$contactUsername" }.take(60)
+
+        val payload = mutableMapOf<String, Any>(
             "contactUid" to contactUid,
-            "contactUsername" to contactUsername,
-            "contactName" to contactName,
-            "createdAt" to FieldValue.serverTimestamp()
+            "contactUsername" to contactUsername.trim().take(35),
+            "contactName" to (effectiveCustom.ifBlank { safeRealName }),
+            "realDisplayName" to safeRealName,
+            "customName" to effectiveCustom
         )
+        if (existingSnap == null || !existingSnap.exists()) {
+            payload["createdAt"] = FieldValue.serverTimestamp()
+        }
         try {
-            docRef.set(payload).await()
+            docRef.set(payload, SetOptions.merge()).await()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -73,11 +94,61 @@ class ContactRepository(private val db: FirebaseFirestore) {
         }
     }
 
+    suspend fun updateContactCustomName(
+        contactUid: String,
+        customName: String,
+        contactUsername: String,
+        realDisplayName: String
+    ) {
+        val uid = requireUserId()
+        val docRef = db.collection("users").document(uid).collection("contacts").document(contactUid)
+        val trimmedCustom = customName.trim().take(60)
+        val safeReal = realDisplayName.trim().ifBlank { "@$contactUsername" }.take(60)
+        val payload = mutableMapOf<String, Any>(
+            "contactUid" to contactUid,
+            "contactUsername" to contactUsername.trim().take(35),
+            "realDisplayName" to safeReal,
+            "customName" to trimmedCustom,
+            "contactName" to trimmedCustom.ifBlank { safeReal }
+        )
+        val existingSnap = runCatching { docRef.get().await() }.getOrNull()
+        if (existingSnap == null || !existingSnap.exists()) {
+            payload["createdAt"] = FieldValue.serverTimestamp()
+        }
+        try {
+            docRef.set(payload, SetOptions.merge()).await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            throw e
+        }
+    }
+
+    suspend fun removeContact(contactUid: String) {
+        val uid = requireUserId()
+        val docRef = db.collection("users").document(uid).collection("contacts").document(contactUid)
+        try {
+            docRef.delete().await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docRef.path)
+            throw e
+        }
+    }
+
     fun observeBlockedUsers(userId: String): Flow<List<BlockedUser>> = flow {
         val col = db.collection("users").document(userId).collection("blockedUsers")
         emitAll(
             col.snapshots()
-                .map { snapshot -> snapshot.toObjects(BlockedUser::class.java) }
+                .map { snapshot ->
+                    snapshot.documents.mapNotNull { doc ->
+                        doc.toObject(BlockedUser::class.java)?.let {
+                            if (it.blockedUid.isBlank()) it.copy(blockedUid = doc.id) else it
+                        }
+                    }
+                }
                 .catch { error ->
                     val firestoreError = generateSequence(error) { it.cause }
                         .filterIsInstance<FirebaseFirestoreException>()

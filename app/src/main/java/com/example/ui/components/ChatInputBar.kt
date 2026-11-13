@@ -1,6 +1,9 @@
 package com.example.ui.components
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -37,10 +40,11 @@ import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Mood
 import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -59,14 +63,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.example.data.model.Message
 import com.example.ui.theme.TelegramBlue
 import kotlinx.coroutines.delay
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -74,33 +81,77 @@ fun ChatInputBar(
     text: String,
     onTextChange: (String) -> Unit,
     onSendText: (String) -> Unit,
-    onSendImage: (String) -> Unit,
+    onSendImageUri: (Uri) -> Unit,
+    onSendVideoUri: (Uri) -> Unit,
     onSendVoice: (String, Int) -> Unit,
-    onSendLocation: (Double, Double, String) -> Unit,
-    onSendDocument: (String, Long) -> Unit,
+    onOpenLocationPicker: () -> Unit,
+    onSendDocumentUri: (Uri) -> Unit,
     onSendSticker: (String) -> Unit,
     replyingMessage: Message? = null,
     editingMessage: Message? = null,
+    isUploadingMedia: Boolean = false,
     onCancelReply: () -> Unit = {},
     onCancelEdit: () -> Unit = {},
     onConfirmEdit: (String) -> Unit = {},
-    onStartVoiceRecording: () -> Unit = {},
+    onStartVoiceRecording: () -> Boolean = { false },
     onStopVoiceRecording: () -> Pair<String?, Int> = { Pair(null, 0) },
     onCancelVoiceRecording: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     var isRecording by remember { mutableStateOf(false) }
     var recordingSeconds by remember { mutableIntStateOf(0) }
     var showAttachmentSheet by remember { mutableStateOf(false) }
     var showStickerSheet by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState()
 
-    // Photo picker launcher with zero permissions
+    val beginVoiceCapture = {
+        val started = onStartVoiceRecording()
+        if (started) {
+            isRecording = true
+        } else {
+            Toast.makeText(context, "تعذر بدء التسجيل الصوتي", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val micPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            beginVoiceCapture()
+        } else {
+            Toast.makeText(
+                context,
+                "يرجى منح إذن الميكروفون لتسجيل الرسائل الصوتية",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    // Zero-permission Photo Picker
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? ->
         if (uri != null) {
-            onSendImage(uri.toString())
+            onSendImageUri(uri)
+        }
+    }
+
+    // Zero-permission Video Picker
+    val videoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            onSendVideoUri(uri)
+        }
+    }
+
+    // Real system Document Picker (SAF)
+    val documentPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            onSendDocumentUri(uri)
         }
     }
 
@@ -119,6 +170,21 @@ fun ChatInputBar(
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surface)
     ) {
+        AnimatedVisibility(visible = isUploadingMedia) {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = TelegramBlue
+                )
+                Text(
+                    text = "جاري رفع الملف إلى السحابة...",
+                    fontSize = 11.sp,
+                    color = TelegramBlue,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
+                )
+            }
+        }
+
         // Reply Banner Preview
         AnimatedVisibility(
             visible = replyingMessage != null,
@@ -155,8 +221,8 @@ fun ChatInputBar(
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
                         )
                     }
-                    IconButton(onClick = onCancelReply, modifier = Modifier.size(24.dp)) {
-                        Icon(Icons.Default.Close, contentDescription = "Cancel reply", tint = Color.Gray)
+                    IconButton(onClick = onCancelReply, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "إلغاء الرد", tint = Color.Gray)
                     }
                 }
             }
@@ -176,7 +242,7 @@ fun ChatInputBar(
                         .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
                         .padding(horizontal = 12.dp, vertical = 6.dp)
                 ) {
-                    Icon(Icons.Default.Edit, contentDescription = "Edit", tint = TelegramBlue, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Default.Edit, contentDescription = "تعديل", tint = TelegramBlue, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(8.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
@@ -193,8 +259,8 @@ fun ChatInputBar(
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
                         )
                     }
-                    IconButton(onClick = onCancelEdit, modifier = Modifier.size(24.dp)) {
-                        Icon(Icons.Default.Close, contentDescription = "Cancel edit", tint = Color.Gray)
+                    IconButton(onClick = onCancelEdit, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "إلغاء التعديل", tint = Color.Gray)
                     }
                 }
             }
@@ -208,16 +274,16 @@ fun ChatInputBar(
                 .padding(horizontal = 8.dp, vertical = 6.dp)
         ) {
             if (isRecording) {
-                // Recording Mode UI
                 IconButton(
                     onClick = {
                         isRecording = false
                         onCancelVoiceRecording()
-                    }
+                    },
+                    modifier = Modifier.testTag("cancel_voice_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Delete,
-                        contentDescription = "Cancel recording",
+                        contentDescription = "إلغاء التسجيل",
                         tint = Color(0xFFE53935)
                     )
                 }
@@ -236,7 +302,7 @@ fun ChatInputBar(
                     val mins = recordingSeconds / 60
                     val secs = recordingSeconds % 60
                     Text(
-                        text = String.format("%02d:%02d", mins, secs),
+                        text = String.format(Locale.US, "%02d:%02d", mins, secs),
                         fontSize = 15.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = Color(0xFFE53935)
@@ -255,29 +321,34 @@ fun ChatInputBar(
                         val (filePath, dur) = onStopVoiceRecording()
                         if (!filePath.isNullOrBlank()) {
                             onSendVoice(filePath, dur)
+                        } else {
+                            Toast.makeText(
+                                context,
+                                "التسجيل قصير جداً أو تعذر حفظ الملف الصوتي",
+                                Toast.LENGTH_SHORT
+                            ).show()
                         }
                     },
                     modifier = Modifier
-                        .size(44.dp)
+                        .size(48.dp)
                         .background(TelegramBlue, CircleShape)
                         .testTag("send_voice_button")
                 ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.Send,
-                        contentDescription = "Send voice",
+                        contentDescription = "إرسال التسجيل الصوتي",
                         tint = Color.White,
                         modifier = Modifier.size(20.dp)
                     )
                 }
             } else {
-                // Normal Text & Attachment Mode
                 IconButton(
                     onClick = { showStickerSheet = true },
-                    modifier = Modifier.size(40.dp)
+                    modifier = Modifier.size(44.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Mood,
-                        contentDescription = "Emoji and Stickers",
+                        contentDescription = "الملصقات والإيموجي",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
@@ -306,11 +377,13 @@ fun ChatInputBar(
                     trailingIcon = {
                         IconButton(
                             onClick = { showAttachmentSheet = true },
-                            modifier = Modifier.size(36.dp)
+                            modifier = Modifier
+                                .size(40.dp)
+                                .testTag("attachments_button")
                         ) {
                             Icon(
                                 imageVector = Icons.Default.AttachFile,
-                                contentDescription = "Attachments",
+                                contentDescription = "إرفاق ملف أو موقع",
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
@@ -330,13 +403,13 @@ fun ChatInputBar(
                             }
                         },
                         modifier = Modifier
-                            .size(44.dp)
+                            .size(48.dp)
                             .background(TelegramBlue, CircleShape)
                             .testTag("send_message_button")
                     ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.Send,
-                            contentDescription = "Send",
+                            contentDescription = "إرسال",
                             tint = Color.White,
                             modifier = Modifier.size(20.dp)
                         )
@@ -344,17 +417,24 @@ fun ChatInputBar(
                 } else {
                     IconButton(
                         onClick = {
-                            isRecording = true
-                            onStartVoiceRecording()
+                            val granted = ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.RECORD_AUDIO
+                            ) == PackageManager.PERMISSION_GRANTED
+                            if (granted) {
+                                beginVoiceCapture()
+                            } else {
+                                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            }
                         },
                         modifier = Modifier
-                            .size(44.dp)
+                            .size(48.dp)
                             .background(TelegramBlue, CircleShape)
                             .testTag("record_voice_button")
                     ) {
                         Icon(
                             imageVector = Icons.Default.Mic,
-                            contentDescription = "Record voice",
+                            contentDescription = "تسجيل صوتي",
                             tint = Color.White,
                             modifier = Modifier.size(22.dp)
                         )
@@ -364,7 +444,6 @@ fun ChatInputBar(
         }
     }
 
-    // Attachments Bottom Sheet
     if (showAttachmentSheet) {
         ModalBottomSheet(
             onDismissRequest = { showAttachmentSheet = false },
@@ -399,21 +478,32 @@ fun ChatInputBar(
                         }
                     )
                     AttachmentOption(
+                        icon = Icons.Default.Videocam,
+                        label = "فيديو",
+                        bgColor = Color(0xFF8E24AA),
+                        onClick = {
+                            showAttachmentSheet = false
+                            videoPickerLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)
+                            )
+                        }
+                    )
+                    AttachmentOption(
                         icon = Icons.Default.InsertDriveFile,
                         label = "ملف / مستند",
                         bgColor = Color(0xFF43A047),
                         onClick = {
                             showAttachmentSheet = false
-                            onSendDocument("Barq_Document.pdf", 245760L)
+                            documentPickerLauncher.launch(arrayOf("*/*"))
                         }
                     )
                     AttachmentOption(
                         icon = Icons.Default.LocationOn,
-                        label = "الموقع الحالي",
+                        label = "الموقع",
                         bgColor = Color(0xFFE53935),
                         onClick = {
                             showAttachmentSheet = false
-                            onSendLocation(24.7136, 46.6753, "الرياض، المملكة العربية السعودية")
+                            onOpenLocationPicker()
                         }
                     )
                 }
@@ -422,7 +512,6 @@ fun ChatInputBar(
         }
     }
 
-    // Stickers and Emojis Bottom Sheet
     if (showStickerSheet) {
         ModalBottomSheet(
             onDismissRequest = { showStickerSheet = false }
@@ -464,8 +553,7 @@ fun ChatInputBar(
                                 }
                         ) {
                             Box(
-                                modifier = Modifier
-                                    .padding(vertical = 12.dp, horizontal = 6.dp),
+                                modifier = Modifier.padding(vertical = 12.dp, horizontal = 6.dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(

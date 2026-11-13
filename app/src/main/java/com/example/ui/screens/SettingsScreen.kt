@@ -1,6 +1,11 @@
 package com.example.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Build
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -16,23 +21,29 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.ColorLens
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Language
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -41,6 +52,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Scaffold
@@ -51,6 +63,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -62,11 +75,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.data.model.User
+import androidx.core.content.ContextCompat
+import com.example.BuildConfig
 import com.example.data.repository.ContactRepository
 import com.example.data.repository.UserRepository
 import com.example.ui.components.AvatarView
@@ -76,6 +92,11 @@ import com.example.ui.theme.AccentEmerald
 import com.example.ui.theme.AccentOrange
 import com.example.ui.theme.AccentViolet
 import com.example.ui.theme.TelegramBlue
+import com.example.util.NotificationHelper
+import com.example.util.NotificationPreferences
+import com.example.util.catchToFallback
+import com.google.firebase.messaging.FirebaseMessaging
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -93,21 +114,53 @@ fun SettingsScreen(
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
-    val userProfile by userRepository.observeUserProfile(currentUserId).collectAsState(initial = null)
-    val blockedUsers by contactRepository.observeBlockedUsers(currentUserId).collectAsState(initial = emptyList())
+    val userProfile by remember(currentUserId) {
+        userRepository.observeUserProfile(currentUserId).catchToFallback(null)
+    }.collectAsState(initial = null)
+    val blockedUsers by remember(currentUserId) {
+        contactRepository.observeBlockedUsers(currentUserId).catchToFallback(emptyList())
+    }.collectAsState(initial = emptyList())
+
+    var notifPrefs by remember { mutableStateOf(NotificationHelper.getPreferences(context)) }
+    var hasSystemNotifPermission by remember { mutableStateOf(NotificationHelper.hasNotificationPermission(context)) }
 
     var showSignOutDialog by remember { mutableStateOf(false) }
     var showPrivacySheet by remember { mutableStateOf(false) }
     var showBlockedUsersSheet by remember { mutableStateOf(false) }
     var showSessionsSheet by remember { mutableStateOf(false) }
+    var showNotificationsSheet by remember { mutableStateOf(false) }
+    var showAboutDialog by remember { mutableStateOf(false) }
+
+    val notificationLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasSystemNotifPermission = granted
+        if (granted) {
+            Toast.makeText(context, "تم تفعيل إشعارات التطبيق", Toast.LENGTH_SHORT).show()
+            runCatching {
+                FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
+                    coroutineScope.launch { userRepository.saveFcmToken(token) }
+                }
+            }
+        } else {
+            Toast.makeText(context, "تم رفض إذن الإشعارات", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun updateNotifPrefs(transform: (NotificationPreferences) -> NotificationPreferences) {
+        val next = transform(notifPrefs)
+        notifPrefs = next
+        NotificationHelper.savePreferences(context, next)
+    }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    IconButton(onClick = onBack, modifier = Modifier.testTag("settings_back_button")) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "رجوع")
                     }
                 },
                 title = { Text("الإعدادات", fontWeight = FontWeight.Bold) },
@@ -120,6 +173,7 @@ fun SettingsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .testTag("settings_list")
         ) {
             // Profile Card Header
             item {
@@ -167,7 +221,7 @@ fun SettingsScreen(
                         }
 
                         IconButton(onClick = onNavigateToEditProfile) {
-                            Icon(Icons.Default.Edit, contentDescription = "Edit Profile", tint = TelegramBlue)
+                            Icon(Icons.Default.Edit, contentDescription = "تعديل الملف الشخصي", tint = TelegramBlue)
                         }
                     }
                 }
@@ -239,9 +293,9 @@ fun SettingsScreen(
                 Spacer(modifier = Modifier.height(14.dp))
             }
 
-            // Section 2: Privacy & Security
+            // Section 2: Privacy, Security & Notifications
             item {
-                SectionHeader("الخصوصية والأمان")
+                SectionHeader("الإشعارات والأصوات والخصوصية")
                 Card(
                     shape = RoundedCornerShape(12.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -250,6 +304,18 @@ fun SettingsScreen(
                         .padding(horizontal = 16.dp, vertical = 4.dp)
                 ) {
                     Column {
+                        SettingsRow(
+                            icon = Icons.Default.Notifications,
+                            title = "الإشعارات والأصوات",
+                            subtitle = when {
+                                !hasSystemNotifPermission -> "يتطلب منح إذن الإشعارات من النظام"
+                                !notifPrefs.notificationsEnabled -> "الإشعارات متوقفة"
+                                else -> "مفعّلة للمحادثات والمجموعات والقنوات"
+                            },
+                            onClick = { showNotificationsSheet = true },
+                            modifier = Modifier.testTag("notifications_settings_row")
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
                         SettingsRow(
                             icon = Icons.Default.Security,
                             title = "إعدادات الخصوصية",
@@ -276,7 +342,71 @@ fun SettingsScreen(
                 Spacer(modifier = Modifier.height(14.dp))
             }
 
-            // Section 3: Sign Out
+            // Section 3: Upcoming Features ("المزايا القادمة")
+            item {
+                SectionHeader("المزايا القادمة")
+                Card(
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .testTag("upcoming_features_card")
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Text(
+                            text = "الاتصالات والمكالمات (قريباً • غير متاح حالياً)",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        UpcomingFeatureRow(
+                            icon = Icons.Default.Call,
+                            title = "المكالمات الصوتية",
+                            badge = "قريباً"
+                        )
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                        UpcomingFeatureRow(
+                            icon = Icons.Default.Videocam,
+                            title = "مكالمات الفيديو",
+                            badge = "قريباً"
+                        )
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                        UpcomingFeatureRow(
+                            icon = Icons.Default.CameraAlt,
+                            title = "استخدام الكاميرا أثناء المكالمات",
+                            badge = "قريباً"
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+            }
+
+            // Section 4: About App & Version 26.11.13
+            item {
+                SectionHeader("حول التطبيق")
+                Card(
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                ) {
+                    SettingsRow(
+                        icon = Icons.Default.Info,
+                        title = "حول تطبيق بَرْق",
+                        subtitle = "الإصدار ${BuildConfig.VERSION_NAME}",
+                        onClick = { showAboutDialog = true }
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            // Section 5: Sign Out & Footer Version
             item {
                 Card(
                     shape = RoundedCornerShape(12.dp),
@@ -295,7 +425,7 @@ fun SettingsScreen(
                     ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.Logout,
-                            contentDescription = "Sign Out",
+                            contentDescription = "تسجيل الخروج",
                             tint = Color(0xFFE53935)
                         )
                         Spacer(modifier = Modifier.width(14.dp))
@@ -307,12 +437,173 @@ fun SettingsScreen(
                         )
                     }
                 }
+
+                Text(
+                    text = "بَرْق لنظام Android • الإصدار ${BuildConfig.VERSION_NAME}",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 16.dp)
+                        .testTag("app_version_text")
+                )
+            }
+        }
+    }
+
+    // Notifications Settings Sheet
+    if (showNotificationsSheet) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { showNotificationsSheet = false },
+            sheetState = sheetState
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp, vertical = 8.dp)
+            ) {
+                Text("إعدادات الإشعارات والأصوات", fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(10.dp))
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasSystemNotifPermission) {
+                    Surface(
+                        color = Color(0xFFE53935).copy(alpha = 0.1f),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text(
+                                text = "إذن الإشعارات غير ممنوح في إعدادات النظام",
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFE53935),
+                                fontSize = 13.sp
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Button(
+                                onClick = {
+                                    notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = TelegramBlue)
+                            ) {
+                                Text("تفعيل إذن النظام", color = Color.White)
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
+
+                NotifSwitchRow(
+                    title = "تفعيل الإشعارات",
+                    subtitle = "تشغيل أو إيقاف جميع تنبيهات الرسائل",
+                    checked = notifPrefs.notificationsEnabled,
+                    onCheckedChange = { enabled -> updateNotifPrefs { it.copy(notificationsEnabled = enabled) } }
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+
+                NotifSwitchRow(
+                    title = "إشعارات المحادثات الخاصة",
+                    subtitle = "تنبيه فوري للرسائل المباشرة",
+                    checked = notifPrefs.directNotificationsEnabled,
+                    enabled = notifPrefs.notificationsEnabled,
+                    onCheckedChange = { enabled -> updateNotifPrefs { it.copy(directNotificationsEnabled = enabled) } }
+                )
+                NotifSwitchRow(
+                    title = "إشعارات المجموعات",
+                    subtitle = "تنبيه لرسائل المجموعات المشترك بها",
+                    checked = notifPrefs.groupNotificationsEnabled,
+                    enabled = notifPrefs.notificationsEnabled,
+                    onCheckedChange = { enabled -> updateNotifPrefs { it.copy(groupNotificationsEnabled = enabled) } }
+                )
+                NotifSwitchRow(
+                    title = "إشعارات القنوات",
+                    subtitle = "تنبيه لمنشورات القنوات الجديدة",
+                    checked = notifPrefs.channelNotificationsEnabled,
+                    enabled = notifPrefs.notificationsEnabled,
+                    onCheckedChange = { enabled -> updateNotifPrefs { it.copy(channelNotificationsEnabled = enabled) } }
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+
+                NotifSwitchRow(
+                    title = "معاينة نص الرسالة",
+                    subtitle = "إظهار محتوى الرسالة داخل الإشعار",
+                    checked = notifPrefs.showMessagePreview,
+                    enabled = notifPrefs.notificationsEnabled,
+                    onCheckedChange = { enabled -> updateNotifPrefs { it.copy(showMessagePreview = enabled) } }
+                )
+                NotifSwitchRow(
+                    title = "الصوت",
+                    subtitle = "تشغيل نغمة التنبيه عند وصول رسالة",
+                    checked = notifPrefs.soundEnabled,
+                    enabled = notifPrefs.notificationsEnabled,
+                    onCheckedChange = { enabled -> updateNotifPrefs { it.copy(soundEnabled = enabled) } }
+                )
+                NotifSwitchRow(
+                    title = "الاهتزاز",
+                    subtitle = "اهتزاز الجهاز عند استلام الإشعار",
+                    checked = notifPrefs.vibrateEnabled,
+                    enabled = notifPrefs.notificationsEnabled,
+                    onCheckedChange = { enabled -> updateNotifPrefs { it.copy(vibrateEnabled = enabled) } }
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedButton(
+                    onClick = {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                        ) {
+                            notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        } else {
+                            NotificationHelper.showIncomingMessageNotification(
+                                context = context,
+                                chatId = "",
+                                chatType = "direct",
+                                title = "بَرْق",
+                                body = "الإشعارات تعمل بنجاح على جهازك"
+                            )
+                            Toast.makeText(context, "تم إرسال إشعار تحقق إلى شريط التنبيهات", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("test_notification_button")
+                ) {
+                    Icon(Icons.Default.NotificationsActive, contentDescription = null, tint = TelegramBlue)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("إرسال إشعار تحقق للنظام", color = TelegramBlue, fontWeight = FontWeight.Bold)
+                }
+
                 Spacer(modifier = Modifier.height(24.dp))
             }
         }
     }
 
-    // Sign Out Confirmation Dialog
+    if (showAboutDialog) {
+        AlertDialog(
+            onDismissRequest = { showAboutDialog = false },
+            title = { Text("حول تطبيق بَرْق (Barq)") },
+            text = {
+                Column {
+                    Text("تطبيق مراسلة فوري حديث مبني على خدمات Firebase السحابية.", fontSize = 14.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "رقم الإصدار: ${BuildConfig.VERSION_NAME}",
+                        fontWeight = FontWeight.Bold,
+                        color = TelegramBlue
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showAboutDialog = false }) {
+                    Text("حسناً", color = TelegramBlue, fontWeight = FontWeight.Bold)
+                }
+            }
+        )
+    }
+
     if (showSignOutDialog) {
         AlertDialog(
             onDismissRequest = { showSignOutDialog = false },
@@ -336,7 +627,6 @@ fun SettingsScreen(
         )
     }
 
-    // Privacy Settings Bottom Sheet
     if (showPrivacySheet) {
         val currentPrivacy = userProfile?.lastSeenPrivacy ?: "everyone"
         ModalBottomSheet(onDismissRequest = { showPrivacySheet = false }) {
@@ -354,15 +644,22 @@ fun SettingsScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable {
+                                val profile = userProfile ?: return@clickable
                                 coroutineScope.launch {
-                                    userRepository.updateUserProfile(
-                                        displayName = userProfile?.displayName ?: "",
-                                        username = userProfile?.username ?: "",
-                                        bio = userProfile?.bio ?: "",
-                                        avatarUrl = userProfile?.avatarUrl ?: "",
-                                        lastSeenPrivacy = key,
-                                        avatarPrivacy = userProfile?.avatarPrivacy ?: "everyone"
-                                    )
+                                    try {
+                                        userRepository.updateUserProfile(
+                                            displayName = profile.displayName,
+                                            username = profile.username,
+                                            bio = profile.bio,
+                                            avatarUrl = profile.avatarUrl,
+                                            lastSeenPrivacy = key,
+                                            avatarPrivacy = profile.avatarPrivacy
+                                        )
+                                    } catch (e: CancellationException) {
+                                        throw e
+                                    } catch (_: Exception) {
+                                        Toast.makeText(context, "تعذر تحديث الخصوصية", Toast.LENGTH_SHORT).show()
+                                    }
                                 }
                             }
                             .padding(vertical = 8.dp)
@@ -381,7 +678,6 @@ fun SettingsScreen(
         }
     }
 
-    // Blocked Users Bottom Sheet
     if (showBlockedUsersSheet) {
         ModalBottomSheet(onDismissRequest = { showBlockedUsersSheet = false }) {
             Column(modifier = Modifier.padding(20.dp)) {
@@ -407,7 +703,13 @@ fun SettingsScreen(
                             TextButton(
                                 onClick = {
                                     coroutineScope.launch {
-                                        contactRepository.unblockUser(bUser.blockedUid)
+                                        try {
+                                            contactRepository.unblockUser(bUser.blockedUid)
+                                        } catch (e: CancellationException) {
+                                            throw e
+                                        } catch (_: Exception) {
+                                            Toast.makeText(context, "تعذر إلغاء الحظر", Toast.LENGTH_SHORT).show()
+                                        }
                                     }
                                 }
                             ) {
@@ -421,7 +723,6 @@ fun SettingsScreen(
         }
     }
 
-    // Active Sessions Bottom Sheet
     if (showSessionsSheet) {
         ModalBottomSheet(onDismissRequest = { showSessionsSheet = false }) {
             Column(modifier = Modifier.padding(20.dp)) {
@@ -439,12 +740,82 @@ fun SettingsScreen(
                     }
                     Spacer(modifier = Modifier.width(14.dp))
                     Column {
-                        Text("${Build.MANUFACTURER.capitalize()} ${Build.MODEL}", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                        Text("Barq Android App • متصل الآن (هذا الجهاز)", fontSize = 12.sp, color = TelegramBlue)
+                        Text("${Build.MANUFACTURER} ${Build.MODEL}", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                        Text("Barq ${BuildConfig.VERSION_NAME} • متصل الآن (هذا الجهاز)", fontSize = 12.sp, color = TelegramBlue)
                     }
                 }
                 Spacer(modifier = Modifier.height(24.dp))
             }
+        }
+    }
+}
+
+@Composable
+private fun NotifSwitchRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    enabled: Boolean = true,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp)
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+            Text(
+                text = title,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium,
+                color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+            )
+            Text(
+                text = subtitle,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (enabled) 1f else 0.5f)
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            enabled = enabled,
+            colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = TelegramBlue)
+        )
+    }
+}
+
+@Composable
+private fun UpcomingFeatureRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    badge: String
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+        Spacer(modifier = Modifier.width(12.dp))
+        Text(
+            text = title,
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+            modifier = Modifier.weight(1f)
+        )
+        Surface(
+            color = TelegramBlue.copy(alpha = 0.14f),
+            shape = RoundedCornerShape(8.dp)
+        ) {
+            Text(
+                text = badge,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = TelegramBlue,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+            )
         }
     }
 }
@@ -465,11 +836,12 @@ private fun SettingsRow(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     title: String,
     subtitle: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 12.dp)

@@ -17,8 +17,8 @@ android {
     applicationId = "com.aistudio.telechat.vknzql"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = 261113
+    versionName = "26.11.13"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -118,8 +118,9 @@ dependencies {
   implementation(libs.converter.moshi)
   // implementation(libs.firebase.ai)
   implementation(libs.firebase.firestore)
-
   implementation(libs.firebase.auth)
+  implementation(libs.firebase.storage)
+  implementation(libs.firebase.messaging)
   implementation(libs.androidx.credentials)
   implementation(libs.androidx.credentials.play.services)
   implementation(libs.googleid)
@@ -130,7 +131,7 @@ dependencies {
   implementation(libs.logging.interceptor)
   implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)
-  // implementation(libs.play.services.location)
+  implementation(libs.play.services.location)
   implementation(libs.retrofit)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)

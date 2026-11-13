@@ -23,7 +23,6 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.ui.theme.AvatarGradients
 import com.example.ui.theme.TelegramGreenCheck
-import kotlin.math.abs
 
 @Composable
 fun AvatarView(
@@ -37,7 +36,7 @@ fun AvatarView(
     val cleanName = name.ifBlank { "Barq" }
     val initial = cleanName.first().uppercase()
 
-    val gradientIndex = abs(cleanName.hashCode()) % AvatarGradients.size
+    val gradientIndex = (cleanName.hashCode() and Int.MAX_VALUE) % AvatarGradients.size
     val gradient = AvatarGradients[gradientIndex]
 
     Box(

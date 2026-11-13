@@ -43,8 +43,11 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.widget.Toast
+import androidx.compose.ui.platform.LocalContext
 import com.example.data.repository.ChatRepository
 import com.example.ui.theme.TelegramBlue
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -56,6 +59,7 @@ fun CreateChannelScreen(
     onChannelCreated: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     var channelName by remember { mutableStateOf("") }
     var channelAbout by remember { mutableStateOf("") }
@@ -201,15 +205,22 @@ fun CreateChannelScreen(
                     if (channelName.isNotBlank() && !isCreating) {
                         isCreating = true
                         coroutineScope.launch {
-                            val newChannel = chatRepository.createChannel(
-                                name = channelName.trim(),
-                                username = channelUsername.trim(),
-                                about = channelAbout.trim(),
-                                avatarUrl = "",
-                                isPublic = isPublic
-                            )
-                            isCreating = false
-                            onChannelCreated(newChannel.chatId)
+                            try {
+                                val newChannel = chatRepository.createChannel(
+                                    name = channelName.trim(),
+                                    username = channelUsername.trim(),
+                                    about = channelAbout.trim(),
+                                    avatarUrl = "",
+                                    isPublic = isPublic
+                                )
+                                onChannelCreated(newChannel.chatId)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "تعذر إنشاء القناة", Toast.LENGTH_SHORT).show()
+                            } finally {
+                                isCreating = false
+                            }
                         }
                     }
                 },

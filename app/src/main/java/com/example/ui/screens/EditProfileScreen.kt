@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -43,13 +44,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.repository.StorageRepository
 import com.example.data.repository.UserRepository
 import com.example.ui.components.AvatarView
 import com.example.ui.theme.TelegramBlue
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -58,14 +62,19 @@ import kotlinx.coroutines.launch
 fun EditProfileScreen(
     currentUserId: String,
     userRepository: UserRepository,
+    storageRepository: StorageRepository,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     var displayName by remember { mutableStateOf("") }
     var username by remember { mutableStateOf("") }
     var bio by remember { mutableStateOf("") }
     var avatarUrl by remember { mutableStateOf("") }
+    var pendingLocalAvatarUri by remember { mutableStateOf<Uri?>(null) }
+    var lastSeenPrivacy by remember { mutableStateOf("everyone") }
+    var avatarPrivacy by remember { mutableStateOf("everyone") }
     var isLoading by remember { mutableStateOf(true) }
     var isSaving by remember { mutableStateOf(false) }
 
@@ -73,19 +82,60 @@ fun EditProfileScreen(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? ->
         if (uri != null) {
+            pendingLocalAvatarUri = uri
             avatarUrl = uri.toString()
         }
     }
 
     LaunchedEffect(currentUserId) {
-        val profile = userRepository.observeUserProfile(currentUserId).first()
-        if (profile != null) {
+        try {
+            val profile = userRepository.observeUserProfile(currentUserId).first()
+                ?: userRepository.getOrCreateProfile("User")
             displayName = profile.displayName
             username = profile.username
             bio = profile.bio
             avatarUrl = profile.avatarUrl
+            lastSeenPrivacy = profile.lastSeenPrivacy
+            avatarPrivacy = profile.avatarPrivacy
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            Toast.makeText(context, "تعذر تحميل الملف الشخصي", Toast.LENGTH_SHORT).show()
+        } finally {
+            isLoading = false
         }
-        isLoading = false
+    }
+
+    val saveProfile: () -> Unit = {
+        if (!isSaving && displayName.isNotBlank() && username.trim().length >= 3) {
+            isSaving = true
+            coroutineScope.launch {
+                try {
+                    val finalAvatarUrl = if (pendingLocalAvatarUri != null) {
+                        storageRepository.uploadUserAvatar(pendingLocalAvatarUri!!)
+                    } else {
+                        avatarUrl
+                    }
+                    userRepository.updateUserProfile(
+                        displayName = displayName.trim(),
+                        username = username.trim(),
+                        bio = bio.trim(),
+                        avatarUrl = finalAvatarUrl,
+                        lastSeenPrivacy = lastSeenPrivacy,
+                        avatarPrivacy = avatarPrivacy
+                    )
+                    onBack()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Toast.makeText(context, "تعذر حفظ التغييرات: ${e.localizedMessage ?: ""}", Toast.LENGTH_SHORT).show()
+                } finally {
+                    isSaving = false
+                }
+            }
+        } else if (username.trim().length < 3) {
+            Toast.makeText(context, "يجب أن يكون اسم المستخدم 3 أحرف على الأقل", Toast.LENGTH_SHORT).show()
+        }
     }
 
     Scaffold(
@@ -93,36 +143,20 @@ fun EditProfileScreen(
             TopAppBar(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "رجوع")
                     }
                 },
                 title = { Text("تعديل الملف الشخصي", fontWeight = FontWeight.Bold) },
                 actions = {
                     IconButton(
-                        onClick = {
-                            if (!isSaving && displayName.isNotBlank() && username.isNotBlank()) {
-                                isSaving = true
-                                coroutineScope.launch {
-                                    userRepository.updateUserProfile(
-                                        displayName = displayName.trim(),
-                                        username = username.trim(),
-                                        bio = bio.trim(),
-                                        avatarUrl = avatarUrl,
-                                        lastSeenPrivacy = "everyone",
-                                        avatarPrivacy = "everyone"
-                                    )
-                                    isSaving = false
-                                    onBack()
-                                }
-                            }
-                        },
+                        onClick = saveProfile,
                         enabled = !isSaving && displayName.isNotBlank() && username.isNotBlank(),
                         modifier = Modifier.testTag("save_profile_button")
                     ) {
                         if (isSaving) {
                             CircularProgressIndicator(modifier = Modifier.size(20.dp), color = TelegramBlue)
                         } else {
-                            Icon(Icons.Default.Check, contentDescription = "Save", tint = TelegramBlue)
+                            Icon(Icons.Default.Check, contentDescription = "حفظ", tint = TelegramBlue)
                         }
                     }
                 },
@@ -143,7 +177,6 @@ fun EditProfileScreen(
                     .padding(padding)
                     .padding(20.dp)
             ) {
-                // Avatar with Camera Overlay
                 Box(
                     modifier = Modifier
                         .size(90.dp)
@@ -166,7 +199,7 @@ fun EditProfileScreen(
                             .background(Color.Black.copy(alpha = 0.3f)),
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(Icons.Default.CameraAlt, contentDescription = "Change photo", tint = Color.White, modifier = Modifier.size(28.dp))
+                        Icon(Icons.Default.CameraAlt, contentDescription = "تغيير الصورة", tint = Color.White, modifier = Modifier.size(28.dp))
                     }
                 }
 
@@ -210,23 +243,7 @@ fun EditProfileScreen(
                 Spacer(modifier = Modifier.height(24.dp))
 
                 Button(
-                    onClick = {
-                        if (!isSaving && displayName.isNotBlank() && username.isNotBlank()) {
-                            isSaving = true
-                            coroutineScope.launch {
-                                userRepository.updateUserProfile(
-                                    displayName = displayName.trim(),
-                                    username = username.trim(),
-                                    bio = bio.trim(),
-                                    avatarUrl = avatarUrl,
-                                    lastSeenPrivacy = "everyone",
-                                    avatarPrivacy = "everyone"
-                                )
-                                isSaving = false
-                                onBack()
-                            }
-                        }
-                    },
+                    onClick = saveProfile,
                     colors = ButtonDefaults.buttonColors(containerColor = TelegramBlue),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier

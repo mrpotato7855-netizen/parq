@@ -50,10 +50,14 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.widget.Toast
+import androidx.compose.ui.platform.LocalContext
 import com.example.data.repository.ChatRepository
 import com.example.data.repository.ContactRepository
 import com.example.ui.components.AvatarView
 import com.example.ui.theme.TelegramBlue
+import com.example.util.catchToFallback
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -66,13 +70,16 @@ fun CreateGroupScreen(
     onGroupCreated: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     var groupName by remember { mutableStateOf("") }
     var groupAbout by remember { mutableStateOf("") }
     val selectedMemberUids = remember { mutableStateListOf<String>() }
     var isCreating by remember { mutableStateOf(false) }
 
-    val contacts by contactRepository.observeContacts(currentUserId).collectAsState(initial = emptyList())
+    val contacts by remember(currentUserId) {
+        contactRepository.observeContacts(currentUserId).catchToFallback(emptyList())
+    }.collectAsState(initial = emptyList())
 
     Scaffold(
         topBar = {
@@ -187,11 +194,11 @@ fun CreateGroupScreen(
                                     .fillMaxWidth()
                                     .padding(vertical = 8.dp)
                             ) {
-                                AvatarView(name = contact.contactName, size = 42.dp)
+                                AvatarView(name = contact.effectiveDisplayName(), size = 42.dp)
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = contact.contactName,
+                                        text = contact.effectiveDisplayName(),
                                         fontSize = 15.sp,
                                         fontWeight = FontWeight.SemiBold
                                     )
@@ -225,14 +232,21 @@ fun CreateGroupScreen(
                     if (groupName.isNotBlank() && !isCreating) {
                         isCreating = true
                         coroutineScope.launch {
-                            val newGroup = chatRepository.createGroup(
-                                name = groupName.trim(),
-                                about = groupAbout.trim(),
-                                avatarUrl = "",
-                                memberUids = selectedMemberUids.toList()
-                            )
-                            isCreating = false
-                            onGroupCreated(newGroup.chatId)
+                            try {
+                                val newGroup = chatRepository.createGroup(
+                                    name = groupName.trim(),
+                                    about = groupAbout.trim(),
+                                    avatarUrl = "",
+                                    memberUids = selectedMemberUids.toList()
+                                )
+                                onGroupCreated(newGroup.chatId)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "تعذر إنشاء المجموعة", Toast.LENGTH_SHORT).show()
+                            } finally {
+                                isCreating = false
+                            }
                         }
                     }
                 },

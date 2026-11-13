@@ -45,9 +45,11 @@ service cloud.firestore {
              data.ownerId is string && data.ownerId.size() <= 128 &&
              data.participantUids is list && data.participantUids.size() <= 200 &&
              (!('adminUids' in data) || (data.adminUids is list && data.adminUids.size() <= 50)) &&
+             (!('adminPermissions' in data) || data.adminPermissions is map) &&
              (!('name' in data) || data.name == null || (data.name is string && data.name.size() <= 100)) &&
              (!('about' in data) || data.about == null || (data.about is string && data.about.size() <= 500)) &&
              (!('avatarUrl' in data) || data.avatarUrl == null || (data.avatarUrl is string && data.avatarUrl.size() <= 2000)) &&
+             (!('coverUrl' in data) || data.coverUrl == null || (data.coverUrl is string && data.coverUrl.size() <= 2000)) &&
              (!('channelUsername' in data) || data.channelUsername == null || (data.channelUsername is string && data.channelUsername.size() <= 40)) &&
              (!('lastMessage' in data) || data.lastMessage == null || (data.lastMessage is string && data.lastMessage.size() <= 500)) &&
              (!('lastMessageSenderId' in data) || data.lastMessageSenderId == null || (data.lastMessageSenderId is string && data.lastMessageSenderId.size() <= 128)) &&
@@ -55,6 +57,9 @@ service cloud.firestore {
              (!('lastMessageType' in data) || data.lastMessageType == null || (data.lastMessageType is string && data.lastMessageType.size() <= 30)) &&
              (!('pinnedMessageId' in data) || data.pinnedMessageId == null || (data.pinnedMessageId is string && data.pinnedMessageId.size() <= 128)) &&
              (!('isPublic' in data) || data.isPublic is bool) &&
+             (!('onlyAdminsCanPost' in data) || data.onlyAdminsCanPost is bool) &&
+             (!('joinRequiresApproval' in data) || data.joinRequiresApproval is bool) &&
+             (!('isSavedMessages' in data) || data.isSavedMessages is bool) &&
              (!('inviteLink' in data) || data.inviteLink == null || (data.inviteLink is string && data.inviteLink.size() <= 300));
     }
 
@@ -62,7 +67,7 @@ service cloud.firestore {
       return data.messageId is string && data.messageId.size() <= 128 &&
              data.chatId is string && data.chatId.size() <= 128 &&
              data.senderId is string && data.senderId.size() <= 128 &&
-             data.type in ['text', 'image', 'voice', 'document', 'location', 'sticker'] &&
+             data.type in ['text', 'image', 'video', 'voice', 'document', 'location', 'live_location', 'sticker'] &&
              data.content is string && data.content.size() <= 5000 &&
              data.status in ['sent', 'delivered', 'read'] &&
              (!('senderName' in data) || data.senderName == null || (data.senderName is string && data.senderName.size() <= 60)) &&
@@ -73,12 +78,30 @@ service cloud.firestore {
              (!('durationSec' in data) || data.durationSec == null || data.durationSec is int) &&
              (!('latitude' in data) || data.latitude == null || (data.latitude is number)) &&
              (!('longitude' in data) || data.longitude == null || (data.longitude is number)) &&
+             (!('isLiveLocation' in data) || data.isLiveLocation is bool) &&
+             (!('liveLocationActive' in data) || data.liveLocationActive is bool) &&
+             (!('liveLocationExpiresAt' in data) || data.liveLocationExpiresAt == null || data.liveLocationExpiresAt is int) &&
              (!('replyToMessageId' in data) || data.replyToMessageId == null || (data.replyToMessageId is string && data.replyToMessageId.size() <= 128)) &&
              (!('replyToText' in data) || data.replyToText == null || (data.replyToText is string && data.replyToText.size() <= 300)) &&
              (!('replyToSenderName' in data) || data.replyToSenderName == null || (data.replyToSenderName is string && data.replyToSenderName.size() <= 60)) &&
              (!('forwardedFrom' in data) || data.forwardedFrom == null || (data.forwardedFrom is string && data.forwardedFrom.size() <= 60)) &&
              (!('isEdited' in data) || data.isEdited is bool) &&
              (!('viewsCount' in data) || data.viewsCount is int);
+    }
+
+    function isChatParticipantOrPublic(chatId) {
+      return exists(/databases/$(database)/documents/chats/$(chatId)) && (
+        get(/databases/$(database)/documents/chats/$(chatId)).data.isPublic == true ||
+        request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participantUids
+      );
+    }
+
+    function isChatOwnerOrAdmin(chatId) {
+      return exists(/databases/$(database)/documents/chats/$(chatId)) && (
+        request.auth.uid == get(/databases/$(database)/documents/chats/$(chatId)).data.ownerId ||
+        ('adminUids' in get(/databases/$(database)/documents/chats/$(chatId)).data &&
+         request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.adminUids)
+      );
     }
 
     match /users/{userId} {
@@ -111,10 +134,20 @@ service cloud.firestore {
       match /blockedUsers/{blockedUid} {
         allow read, write: if isOwner(userId);
       }
+
+      match /fcmTokens/{tokenId} {
+        allow read, write: if isOwner(userId);
+      }
+    }
+
+    match /reports/{reportId} {
+      allow create: if isSignedIn() && incoming().reporterUid == request.auth.uid;
+      allow read: if isSignedIn() && resource.data.reporterUid == request.auth.uid;
     }
 
     match /chats/{chatId} {
       allow get: if isSignedIn() && (
+        resource == null ||
         resource.data.isPublic == true ||
         request.auth.uid in resource.data.participantUids
       );
@@ -131,9 +164,15 @@ service cloud.firestore {
                        incoming().updatedAt <= request.time &&
                        isValidChat(incoming());
       allow update: if isSignedIn() && (
-        request.auth.uid in existing().participantUids ||
-        existing().isPublic == true ||
-        request.auth.uid in incoming().participantUids
+        request.auth.uid == existing().ownerId ||
+        ('adminUids' in existing() && request.auth.uid in existing().adminUids) ||
+        (request.auth.uid in existing().participantUids &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().participantUids == existing().participantUids &&
+          (!('adminUids' in existing()) || incoming().adminUids == existing().adminUids)) ||
+        (existing().isPublic == true &&
+          incoming().ownerId == existing().ownerId &&
+          request.auth.uid in incoming().participantUids)
       ) &&
       incoming().createdAt == existing().createdAt &&
       incoming().updatedAt is timestamp &&
@@ -142,8 +181,9 @@ service cloud.firestore {
       allow delete: if isSignedIn() && request.auth.uid == existing().ownerId;
 
       match /messages/{messageId} {
-        allow read: if isSignedIn();
+        allow read: if isSignedIn() && isChatParticipantOrPublic(chatId);
         allow create: if isSignedIn() &&
+                         isChatParticipantOrPublic(chatId) &&
                          incoming().senderId == request.auth.uid &&
                          incoming().chatId == chatId &&
                          incoming().createdAt is timestamp &&
@@ -151,7 +191,7 @@ service cloud.firestore {
                          incoming().updatedAt is timestamp &&
                          incoming().updatedAt <= request.time &&
                          isValidMessage(incoming());
-        allow update: if isSignedIn() && (
+        allow update: if isSignedIn() && isChatParticipantOrPublic(chatId) && (
           request.auth.uid == existing().senderId ||
           incoming().diff(existing()).affectedKeys().hasOnly(['viewsCount', 'status', 'updatedAt'])
         ) &&
@@ -159,7 +199,10 @@ service cloud.firestore {
         incoming().updatedAt is timestamp &&
         incoming().updatedAt <= request.time &&
         isValidMessage(incoming());
-        allow delete: if isSignedIn() && request.auth.uid == existing().senderId;
+        allow delete: if isSignedIn() && (
+          request.auth.uid == existing().senderId ||
+          isChatOwnerOrAdmin(chatId)
+        );
       }
     }
 
@@ -169,7 +212,7 @@ service cloud.firestore {
                                incoming().userId == request.auth.uid &&
                                incoming().updatedAt is timestamp &&
                                incoming().updatedAt <= request.time;
-      allow delete: if isSignedIn() && existing().userId == request.auth.uid;
+      allow delete: if isSignedIn() && (resource == null || existing().userId == request.auth.uid);
     }
   }
 }

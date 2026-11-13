@@ -85,6 +85,9 @@ test("Chats: participant can read chat", async () => {
 
   const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
   await assertSucceeds(aliceDb.collection("chats").doc("chat_1").get());
+  await assertSucceeds(
+    aliceDb.collection("chats").where("participantUids", "array-contains", ALICE_UID).get()
+  );
 
   const charlieDb = testEnv.authenticatedContext("charlie_789").firestore();
   await assertFails(charlieDb.collection("chats").doc("chat_1").get());

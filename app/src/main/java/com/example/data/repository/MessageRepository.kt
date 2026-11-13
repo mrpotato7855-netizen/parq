@@ -45,7 +45,11 @@ class MessageRepository(private val db: FirebaseFirestore) {
                 .orderBy("createdAt")
                 .snapshots()
                 .map { snapshot ->
-                    snapshot.toObjects(Message::class.java)
+                    snapshot.documents.mapNotNull { doc ->
+                        doc.toObject(Message::class.java)?.let {
+                            if (it.messageId.isBlank()) it.copy(messageId = doc.id) else it
+                        }
+                    }
                 }
                 .catch { error ->
                     val firestoreError = generateSequence(error) { it.cause }
@@ -71,6 +75,9 @@ class MessageRepository(private val db: FirebaseFirestore) {
         durationSec: Int = 0,
         latitude: Double = 0.0,
         longitude: Double = 0.0,
+        isLiveLocation: Boolean = false,
+        liveLocationActive: Boolean = false,
+        liveLocationExpiresAt: Long = 0L,
         replyToMessageId: String = "",
         replyToText: String = "",
         replyToSenderName: String = "",
@@ -82,14 +89,20 @@ class MessageRepository(private val db: FirebaseFirestore) {
         val messageId = "msg_${UUID.randomUUID()}"
         val docRef = db.collection("chats").document(chatId).collection("messages").document(messageId)
 
+        val safeContent = content.take(5000)
+        val safeSenderName = senderName.take(60)
+        val safeSenderAvatar = senderAvatar.take(2000)
+        val safeReplyText = replyToText.take(300)
+        val safeReplySenderName = replyToSenderName.take(60)
+
         val payload = mutableMapOf<String, Any>(
             "messageId" to messageId,
             "chatId" to chatId,
             "senderId" to uid,
-            "senderName" to senderName,
-            "senderAvatar" to senderAvatar,
+            "senderName" to safeSenderName,
+            "senderAvatar" to safeSenderAvatar,
             "type" to type,
-            "content" to content,
+            "content" to safeContent,
             "status" to "sent",
             "isEdited" to false,
             "viewsCount" to 1L,
@@ -97,33 +110,39 @@ class MessageRepository(private val db: FirebaseFirestore) {
             "updatedAt" to FieldValue.serverTimestamp()
         )
 
-        if (mediaUrl.isNotBlank()) payload["mediaUrl"] = mediaUrl
-        if (fileName.isNotBlank()) payload["fileName"] = fileName
+        if (mediaUrl.isNotBlank()) payload["mediaUrl"] = mediaUrl.take(3000)
+        if (fileName.isNotBlank()) payload["fileName"] = fileName.take(150)
         if (fileSize > 0) payload["fileSize"] = fileSize
         if (durationSec > 0) payload["durationSec"] = durationSec
-        if (latitude != 0.0 || longitude != 0.0) {
+        if (latitude != 0.0 || longitude != 0.0 || type == "location" || type == "live_location") {
             payload["latitude"] = latitude
             payload["longitude"] = longitude
         }
+        if (isLiveLocation || type == "live_location") {
+            payload["isLiveLocation"] = true
+            payload["liveLocationActive"] = liveLocationActive
+            payload["liveLocationExpiresAt"] = liveLocationExpiresAt
+        }
         if (replyToMessageId.isNotBlank()) {
             payload["replyToMessageId"] = replyToMessageId
-            payload["replyToText"] = replyToText
-            payload["replyToSenderName"] = replyToSenderName
+            payload["replyToText"] = safeReplyText
+            payload["replyToSenderName"] = safeReplySenderName
         }
         if (forwardedFrom.isNotBlank()) {
-            payload["forwardedFrom"] = forwardedFrom
+            payload["forwardedFrom"] = forwardedFrom.take(60)
         }
 
         try {
             docRef.set(payload).await()
 
-            // Update parent chat snippet
             val lastSnippet = when (type) {
-                "image" -> "📷 Photo"
-                "voice" -> "🎤 Voice message"
+                "image" -> "📷 صورة"
+                "video" -> "🎬 فيديو"
+                "voice" -> "🎤 رسالة صوتية (${durationSec}ث)"
                 "document" -> "📎 $fileName"
-                "location" -> "📍 Location"
-                "sticker" -> "🎨 Sticker"
+                "location" -> "📍 موقع جغرافي"
+                "live_location" -> "📡 موقع مباشر"
+                "sticker" -> "🎨 ملصق"
                 else -> content.take(60)
             }
             db.collection("chats").document(chatId).update(
@@ -140,19 +159,22 @@ class MessageRepository(private val db: FirebaseFirestore) {
                 messageId = messageId,
                 chatId = chatId,
                 senderId = uid,
-                senderName = senderName,
-                senderAvatar = senderAvatar,
+                senderName = safeSenderName,
+                senderAvatar = safeSenderAvatar,
                 type = type,
-                content = content,
+                content = safeContent,
                 mediaUrl = mediaUrl,
                 fileName = fileName,
                 fileSize = fileSize,
                 durationSec = durationSec,
                 latitude = latitude,
                 longitude = longitude,
+                isLiveLocation = isLiveLocation || type == "live_location",
+                liveLocationActive = liveLocationActive,
+                liveLocationExpiresAt = liveLocationExpiresAt,
                 replyToMessageId = replyToMessageId,
-                replyToText = replyToText,
-                replyToSenderName = replyToSenderName,
+                replyToText = safeReplyText,
+                replyToSenderName = safeReplySenderName,
                 forwardedFrom = forwardedFrom,
                 status = "sent"
             )
@@ -164,11 +186,63 @@ class MessageRepository(private val db: FirebaseFirestore) {
         }
     }
 
+    suspend fun updateLiveLocation(
+        chatId: String,
+        messageId: String,
+        latitude: Double,
+        longitude: Double,
+        active: Boolean,
+        label: String? = null
+    ) {
+        requireUserId()
+        val docRef = db.collection("chats").document(chatId).collection("messages").document(messageId)
+        val updates = mutableMapOf<String, Any>(
+            "latitude" to latitude,
+            "longitude" to longitude,
+            "liveLocationActive" to active,
+            "updatedAt" to FieldValue.serverTimestamp()
+        )
+        if (!label.isNullOrBlank()) {
+            updates["content"] = label.take(5000)
+        }
+        try {
+            docRef.update(updates).await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            throw e
+        }
+    }
+
+    suspend fun forwardMessage(
+        source: Message,
+        targetChatId: String,
+        senderName: String,
+        senderAvatar: String,
+        forwardedFromLabel: String
+    ): Message {
+        return sendMessage(
+            chatId = targetChatId,
+            type = if (source.type == "live_location") "location" else source.type,
+            content = source.content,
+            mediaUrl = source.mediaUrl,
+            fileName = source.fileName,
+            fileSize = source.fileSize,
+            durationSec = source.durationSec,
+            latitude = source.latitude,
+            longitude = source.longitude,
+            forwardedFrom = forwardedFromLabel.ifBlank { source.senderName.ifBlank { "مستخدم" } },
+            senderName = senderName,
+            senderAvatar = senderAvatar
+        )
+    }
+
     suspend fun editMessage(chatId: String, messageId: String, newContent: String) {
         val uid = requireUserId()
         val docRef = db.collection("chats").document(chatId).collection("messages").document(messageId)
         val payload = mapOf(
-            "content" to newContent,
+            "content" to newContent.take(5000),
             "isEdited" to true,
             "updatedAt" to FieldValue.serverTimestamp()
         )
@@ -257,7 +331,11 @@ class MessageRepository(private val db: FirebaseFirestore) {
         emitAll(
             query.snapshots()
                 .map { snapshot ->
-                    snapshot.toObjects(TypingStatus::class.java).filter { it.userId != currentUid }
+                    snapshot.documents.mapNotNull { doc ->
+                        doc.toObject(TypingStatus::class.java)?.let {
+                            if (it.statusId.isBlank()) it.copy(statusId = doc.id) else it
+                        }
+                    }.filter { it.userId != currentUid }
                 }
                 .catch {
                     emit(emptyList())
